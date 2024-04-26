@@ -1,10 +1,5 @@
-import os
 import torch
 import numpy as np
-import imageio
-import json
-import torch.nn.functional as F
-import cv2
 
 # z = z + t
 trans_t = lambda t: torch.Tensor([
@@ -36,46 +31,13 @@ def pose_spherical(theta, phi, radius):
     return c2w
 
 
-def load_blender_data(basedir, half_res=False, testskip=1):
-    splits = ['train', 'val', 'test']
-    metas = {}
-    for s in splits:
-        with open(os.path.join(basedir, 'transforms_{}.json'.format(s)), 'r') as fp:
-            metas[s] = json.load(fp)
-
-    all_imgs = []
-    all_poses = []
-    counts = [0]
-    for s in splits:
-        meta = metas[s]
-        imgs = []
-        poses = []
-
-        skip = testskip
-        for frame in meta['frames'][::skip]:
-            fname = os.path.join(basedir, frame['file_path'] + '.png')
-            imgs.append(imageio.imread(fname))
-            poses.append(np.array(frame['transform_matrix']))
-
-        # 归一化
-        imgs = (np.array(imgs) / 255.).astype(np.float32)  # keep all 4 channels (RGBA)
-        poses = np.array(poses).astype(np.float32)
-        counts.append(counts[-1] + imgs.shape[0])
-        all_imgs.append(imgs)
-        all_poses.append(poses)
-
-    # the index of [train val test]
-    i_split = [np.arange(counts[i], counts[i + 1]) for i in range(3)]
-    imgs = np.concatenate(all_imgs, axis=0)
-    poses = np.concatenate(all_poses, axis=0)
-
-    # imgs.shape = [400,800,800,4]
-    # the height and width of the image
-    H, W = imgs[0].shape[:2]
-    camera_angle_x = float(meta['camera_angle_x'])
-
+def load_blender_data():
+    H, W = 400, 400
+    camera_angle_x = 0.6911112070083618
     # camera_angle_x means fov
     focal = 0.5 * W / np.tan(0.5 * camera_angle_x)
+
+    # imgs.shape = [400,800,800,4]
 
     # view direction when we test
     # This is actually 40 camera poses,
@@ -84,13 +46,5 @@ def load_blender_data(basedir, half_res=False, testskip=1):
                                dim=0)
 
     # image.shape = [800,400,400,4]
-    if half_res:
-        H = H // 2
-        W = W // 2
-        focal = focal / 2
-        imgs_half_res = np.zeros((imgs.shape[0], H, W, 4))
-        for i, img in enumerate(imgs):
-            imgs_half_res[i] = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
-        imgs = imgs_half_res
 
-    return imgs, poses, render_poses, [H, W, focal], i_split
+    return render_poses, [H, W, focal]

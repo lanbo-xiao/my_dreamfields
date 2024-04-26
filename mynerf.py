@@ -7,43 +7,48 @@ import numpy as np
 from tqdm import tqdm, trange
 from load_blender import load_blender_data
 from run_nerf_helpers import *
+import cv2
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 DEBUG = False
+
 
 def batchify(fn, chunk):
     """Constructs a version of 'fn' that applies to smaller batches.
     """
     if chunk is None:
         return fn
+
     def ret(inputs):
-        return torch.cat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
+        return torch.cat([fn(inputs[i:i + chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
+
     return ret
 
-def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
+
+def batchify_rays(rays_flat, chunk=1024 * 32, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
     """
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
-        ret = render_rays(rays_flat[i:i+chunk], **kwargs)
+        ret = render_rays(rays_flat[i:i + chunk], **kwargs)
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
             all_ret[k].append(ret[k])
 
-    all_ret = {k : torch.cat(all_ret[k], 0) for k in all_ret}
+    all_ret = {k: torch.cat(all_ret[k], 0) for k in all_ret}
     return all_ret
 
-def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
 
+def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
     H, W, focal = hwf
 
-    if render_factor!=0:
+    if render_factor != 0:
         # Render downsampled for speed
-        H = H//render_factor
-        W = W//render_factor
-        focal = focal/render_factor
+        H = H // render_factor
+        W = W // render_factor
+        focal = focal / render_factor
 
     rgbs = []
     disps = []
@@ -52,10 +57,10 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     for i, c2w in enumerate(tqdm(render_poses)):
         print(i, time.time() - t)
         t = time.time()
-        rgb, disp, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
+        rgb, disp, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3, :4], **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
-        if i==0:
+        if i == 0:
             print(rgb.shape, disp.shape)
 
         if savedir is not None:
@@ -63,15 +68,16 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             filename = os.path.join(savedir, '{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
 
-
     rgbs = np.stack(rgbs, 0)
     disps = np.stack(disps, 0)
 
     return rgbs, disps
-def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
-                  near=0., far=1.,
-                  use_viewdirs=False, c2w_staticcam=None,
-                  **kwargs):
+
+
+def render(H, W, K, chunk=1024 * 32, rays=None, c2w=None, ndc=True,
+           near=0., far=1.,
+           use_viewdirs=False, c2w_staticcam=None,
+           **kwargs):
     if c2w is not None:
         # special case to render full image
         rays_o, rays_d = get_rays(H, W, K, c2w)
@@ -86,15 +92,15 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
             # special case to visualize effect of viewdirs
             rays_o, rays_d = get_rays(H, W, K, c2w_staticcam)
         viewdirs = viewdirs / torch.norm(viewdirs, dim=-1, keepdim=True)
-        viewdirs = torch.reshape(viewdirs, [-1,3]).float()
+        viewdirs = torch.reshape(viewdirs, [-1, 3]).float()
 
-    sh = rays_d.shape # [..., 3]
+    sh = rays_d.shape  # [..., 3]
 
     # Create ray batch
-    rays_o = torch.reshape(rays_o, [-1,3]).float()
-    rays_d = torch.reshape(rays_d, [-1,3]).float()
+    rays_o = torch.reshape(rays_o, [-1, 3]).float()
+    rays_d = torch.reshape(rays_d, [-1, 3]).float()
 
-    near, far = near * torch.ones_like(rays_d[...,:1]), far * torch.ones_like(rays_d[...,:1])
+    near, far = near * torch.ones_like(rays_d[..., :1]), far * torch.ones_like(rays_d[..., :1])
     rays = torch.cat([rays_o, rays_d, near, far], -1)
     if use_viewdirs:
         rays = torch.cat([rays, viewdirs], -1)
@@ -107,25 +113,26 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
 
     k_extract = ['rgb_map', 'disp_map', 'acc_map']
     ret_list = [all_ret[k] for k in k_extract]
-    ret_dict = {k : all_ret[k] for k in all_ret if k not in k_extract}
+    ret_dict = {k: all_ret[k] for k in all_ret if k not in k_extract}
     return ret_list + [ret_dict]
 
+
 # 从输入到输出的过程
-def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
+def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024 * 64):
     """Prepares inputs and applies network 'fn'.
     """
-    #先展平，只处理最后一个维度
+    # 先展平，只处理最后一个维度
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
     embedded = embed_fn(inputs_flat)
 
     if viewdirs is not None:
-        input_dirs = viewdirs[:,None].expand(inputs.shape)
+        input_dirs = viewdirs[:, None].expand(inputs.shape)
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
         embedded_dirs = embeddirs_fn(input_dirs_flat)
         embedded = torch.cat([embedded, embedded_dirs], -1)
 
     outputs_flat = batchify(fn, netchunk)(embedded)
-    #再展平回到原来的维度
+    # 再展平回到原来的维度
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
     return outputs
 
@@ -133,7 +140,7 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
 def create_nerf(args):
     ###Instantiate NeRF's MLP model
 
-    embed_fn , input_ch = get_embedder(args.multires,args.i_embed)
+    embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
     input_ch_views = 0
     embeddirs_fn = None
     if args.use_viewdirs:
@@ -159,7 +166,6 @@ def create_nerf(args):
                                                                         embed_fn=embed_fn,
                                                                         embeddirs_fn=embeddirs_fn,
                                                                         netchunk=args.netchunk)
-
 
     optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
     start = 0
@@ -189,39 +195,40 @@ def create_nerf(args):
     render_kwargs_test['raw_noise_std'] = 0.
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
 
+
 def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
+    raw2alpha = lambda raw, dists, act_fn=F.relu: 1. - torch.exp(-act_fn(raw) * dists)
 
-    raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
+    dists = z_vals[..., 1:] - z_vals[..., :-1]
+    dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[..., :1].shape)], -1)  # [N_rays, N_samples]
 
-    dists = z_vals[...,1:] - z_vals[...,:-1]
-    dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
+    dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
 
-    dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
-
-    rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
+    rgb = torch.sigmoid(raw[..., :3])  # [N_rays, N_samples, 3]
     noise = 0.
     if raw_noise_std > 0.:
-        noise = torch.randn(raw[...,3].shape) * raw_noise_std
+        noise = torch.randn(raw[..., 3].shape) * raw_noise_std
 
         # Overwrite randomly sampled data if pytest
         if pytest:
             np.random.seed(0)
-            noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
+            noise = np.random.rand(*list(raw[..., 3].shape)) * raw_noise_std
             noise = torch.Tensor(noise)
 
-    alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
+    alpha = raw2alpha(raw[..., 3] + noise, dists)  # [N_rays, N_samples]
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
-    weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
-    rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
+    weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1. - alpha + 1e-10], -1), -1)[:, :-1]
+    rgb_map = torch.sum(weights[..., None] * rgb, -2)  # [N_rays, 3]
 
     depth_map = torch.sum(weights * z_vals, -1)
-    disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
+    disp_map = 1. / torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
     acc_map = torch.sum(weights, -1)
 
     if white_bkgd:
-        rgb_map = rgb_map + (1.-acc_map[...,None])
+        rgb_map = rgb_map + (1. - acc_map[..., None])
 
     return rgb_map, disp_map, acc_map, weights, depth_map
+
 
 def render_rays(ray_batch,
                 network_fn,
@@ -238,23 +245,23 @@ def render_rays(ray_batch,
                 pytest=False):
     N_rays = ray_batch.shape[0]
     rays_o, rays_d = ray_batch[:, 0:3], ray_batch[:, 3:6]  # [N_rays, 3] each
-    viewdirs = ray_batch[:, -3:] if ray_batch.shape[-1] > 8 else None #[N_rays,3]
-    bounds = torch.reshape(ray_batch[..., 6:8], [-1, 1, 2]) #[N_rays,1,2]
+    viewdirs = ray_batch[:, -3:] if ray_batch.shape[-1] > 8 else None  # [N_rays,3]
+    bounds = torch.reshape(ray_batch[..., 6:8], [-1, 1, 2])  # [N_rays,1,2]
     near, far = bounds[..., 0], bounds[..., 1]  # [-1,1]
 
     t_vals = torch.linspace(0., 1., steps=N_samples)
     if not lindisp:
-        z_vals = near * (1.-t_vals) + far * (t_vals)
+        z_vals = near * (1. - t_vals) + far * (t_vals)
     else:
-        z_vals = 1./(1./near * (1.-t_vals) + 1./far * (t_vals))
+        z_vals = 1. / (1. / near * (1. - t_vals) + 1. / far * (t_vals))
 
     z_vals = z_vals.expand([N_rays, N_samples])
 
     if perturb > 0.:
         # get intervals between samples
-        mids = .5 * (z_vals[...,1:] + z_vals[...,:-1])
-        upper = torch.cat([mids, z_vals[...,-1:]], -1)
-        lower = torch.cat([z_vals[...,:1], mids], -1)
+        mids = .5 * (z_vals[..., 1:] + z_vals[..., :-1])
+        upper = torch.cat([mids, z_vals[..., -1:]], -1)
+        lower = torch.cat([z_vals[..., :1], mids], -1)
         # stratified samples in those intervals
         t_rand = torch.rand(z_vals.shape)
 
@@ -266,8 +273,7 @@ def render_rays(ray_batch,
 
         z_vals = lower + (upper - lower) * t_rand
 
-    pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
-
+    pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]  # [N_rays, N_samples, 3]
 
     raw = network_query_fn(pts, viewdirs, network_fn)
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd,
@@ -306,10 +312,11 @@ def render_rays(ray_batch,
 
     return ret
 
+
 def config_parser():
     import configargparse
     parser = configargparse.ArgumentParser()
-    parser.add_argument('--config', is_config_file=True,default="fern.txt",
+    parser.add_argument('--config', is_config_file=True, default="fern.txt",
                         help='config file path')
     parser.add_argument("--expname", type=str,
                         help='experiment name')
@@ -412,29 +419,25 @@ def config_parser():
                         help='frequency of weight ckpt saving')
     parser.add_argument("--i_testset", type=int, default=50000,
                         help='frequency of testset saving')
-    parser.add_argument("--i_video", type=int, default=500,
+    parser.add_argument("--i_video", type=int, default=5000,
                         help='frequency of render_poses video saving')
 
     return parser
+
 
 def train():
     parser = config_parser()
     args = parser.parse_args()
 
-    #load data
+    # load data
     K = None
     # if args.dataset_type =='blender':
-    #images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
-    images, poses, render_poses, hwf, i_split = load_blender_data("/data/jbwang/nerf_test_data/lego")
-    print('Loaded blender', images.shape, render_poses.shape, hwf)
+    # images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
+    render_poses, hwf = load_blender_data()
+    print('pose Loaded', "render_pose_shape = ", render_poses.shape, "hwf = ", hwf)
 
-    i_train, i_val, i_test = i_split
     near = 2.
     far = 6.
-    if args.white_bkgd:
-        images = images[..., :3] * images[..., -1:] + (1. - images[..., -1:])
-    else:
-        images = images[..., :3]
 
     # Cast intrinsics to right types
     H, W, focal = hwf
@@ -444,13 +447,10 @@ def train():
     # 相机内参
     if K is None:
         K = np.array([
-            [focal, 0, 0.5*W],
-            [0, focal, 0.5*H],
+            [focal, 0, 0.5 * W],
+            [0, focal, 0.5 * H],
             [0, 0, 1]
         ])
-
-    if args.render_test:
-        render_poses = np.array(poses[i_test])
 
     # Create log dir and copy the config file
     basedir = args.basedir
@@ -468,47 +468,45 @@ def train():
 
     # Create nerf model
     render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
+
     global_step = start
     bds_dict = {
-        'near' : near,
-        'far' : far,
+        'near': near,
+        'far': far,
     }
     render_kwargs_train.update(bds_dict)
     render_kwargs_test.update(bds_dict)
 
-
     render_poses = torch.Tensor(render_poses).to(device)
 
-    poses = torch.Tensor(poses).to(device)
     # Prepare raybatch tensor if batching random rays
     N_rand = args.N_rand
 
     N_iters = 200000 + 1
     print('Begin to train')
-    print('TRAIN views are', i_train)
-    print('TEST views are', i_test)
-    print('VAL views are', i_val)
 
     start = start + 1
     for i in trange(start, N_iters):
         time0 = time.time()
 
         # Random from one image
-        img_i = np.random.choice(i_train)
-        target = images[img_i]
+        target = np.array(imageio.imread("/data/jbwang/nerf_test_data/lego/train/r_0.png"))
+        target = cv2.resize(target,(W,H))
         target = torch.Tensor(target).to(device)
-        pose = poses[img_i, :3, :4]
+        print("图片的形状为：", target.shape)
+        pose = render_poses[0]
+        print("相机姿势为",pose)
 
         if N_rand is not None:
             # rays_o 是射线的原点，且所有原点原点相同  400 * 400 * 3
             # rays_d 是世界坐标系下的射线方向 shape: 400 * 400 * 3  3代表射线方向
             rays_o, rays_d = get_rays(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
 
-            #对图像更中心的区域进行训练的轮次
-            #最后就是返回图像[100:300, 100:300]之间的区域点
+            # 对图像更中心的区域进行训练的轮次
+            # 最后就是返回图像[100:300, 100:300]之间的区域点
             if i < args.precrop_iters:
-                dH = int(H // 2 * args.precrop_frac)   # dH = 400
-                dW = int(W // 2 * args.precrop_frac)   # dW = 400
+                dH = int(H // 2 * args.precrop_frac)  # dH = 400
+                dW = int(W // 2 * args.precrop_frac)  # dW = 400
                 coords = torch.stack(
                     torch.meshgrid(
                         torch.linspace(H // 2 - dH, H // 2 + dH - 1, 2 * dH),
@@ -606,4 +604,3 @@ if __name__ == '__main__':
     print(torch.cuda.is_available())
     torch.set_default_tensor_type(torch.cuda.FloatTensor)
     train()
-
