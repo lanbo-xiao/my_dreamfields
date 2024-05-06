@@ -7,7 +7,8 @@ import numpy as np
 from tqdm import tqdm, trange
 from load_blender import load_blender_data
 from run_nerf_helpers import *
-import cv2
+import clip
+from PIL import Image
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
@@ -419,7 +420,7 @@ def config_parser():
                         help='frequency of weight ckpt saving')
     parser.add_argument("--i_testset", type=int, default=50000,
                         help='frequency of testset saving')
-    parser.add_argument("--i_video", type=int, default=5000,
+    parser.add_argument("--i_video", type=int, default=12000,
                         help='frequency of render_poses video saving')
 
     return parser
@@ -433,11 +434,16 @@ def train():
     K = None
     # if args.dataset_type =='blender':
     # images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
-    render_poses, hwf = load_blender_data()
-    print('pose Loaded', "render_pose_shape = ", render_poses.shape, "hwf = ", hwf)
+    images, poses, render_poses, hwf, i_split = load_blender_data("/data/jbwang/nerf_test_data/lego")
+    print('Loaded blender', images.shape, render_poses.shape, hwf)
 
+    i_train, i_val, i_test = i_split
     near = 2.
     far = 6.
+    if args.white_bkgd:
+        images = images[..., :3] * images[..., -1:] + (1. - images[..., -1:])
+    else:
+        images = images[..., :3]
 
     # Cast intrinsics to right types
     H, W, focal = hwf
@@ -452,23 +458,25 @@ def train():
             [0, 0, 1]
         ])
 
+    if args.render_test:
+        render_poses = np.array(poses[i_test])
+
     # Create log dir and copy the config file
     basedir = args.basedir
     expname = args.expname
-    os.makedirs(os.path.join(basedir, expname), exist_ok=True)
-    f = os.path.join(basedir, expname, 'args.txt')
-    with open(f, 'w') as file:
-        for arg in sorted(vars(args)):
-            attr = getattr(args, arg)
-            file.write('{} = {}\n'.format(arg, attr))
-    if args.config is not None:
-        f = os.path.join(basedir, expname, 'config.txt')
-        with open(f, 'w') as file:
-            file.write(open(args.config, 'r').read())
+    # os.makedirs(os.path.join(basedir, expname), exist_ok=True)
+    # f = os.path.join(basedir, expname, 'args.txt')
+    # with open(f, 'w') as file:
+    #     for arg in sorted(vars(args)):
+    #         attr = getattr(args, arg)
+    #         file.write('{} = {}\n'.format(arg, attr))
+    # if args.config is not None:
+    #     f = os.path.join(basedir, expname, 'config.txt')
+    #     with open(f, 'w') as file:
+    #         file.write(open(args.config, 'r').read())
 
     # Create nerf model
     render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
-
     global_step = start
     bds_dict = {
         'near': near,
@@ -479,23 +487,25 @@ def train():
 
     render_poses = torch.Tensor(render_poses).to(device)
 
+    poses = torch.Tensor(poses).to(device)
     # Prepare raybatch tensor if batching random rays
     N_rand = args.N_rand
 
     N_iters = 200000 + 1
     print('Begin to train')
+    print('TRAIN views are', i_train)
+    print('TEST views are', i_test)
+    print('VAL views are', i_val)
 
     start = start + 1
     for i in trange(start, N_iters):
         time0 = time.time()
 
         # Random from one image
-        target = np.array(imageio.imread("/data/jbwang/nerf_test_data/lego/train/r_0.png"))
-        target = cv2.resize(target,(W,H))
+        img_i = np.random.choice(i_train)
+        target = images[img_i]
         target = torch.Tensor(target).to(device)
-        print("图片的形状为：", target.shape)
-        pose = render_poses[0]
-        print("相机姿势为",pose)
+        pose = poses[img_i, :3, :4]
 
         if N_rand is not None:
             # rays_o 是射线的原点，且所有原点原点相同  400 * 400 * 3
@@ -522,6 +532,7 @@ def train():
             coords = torch.reshape(coords, [-1, 2])  # (H * W, 2)
             select_inds = np.random.choice(coords.shape[0], size=[N_rand], replace=False)  # (N_rand,)
             select_coords = coords[select_inds].long()  # (N_rand, 2)
+            #select_coords = coords.long()
             rays_o = rays_o[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
             rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
             batch_rays = torch.stack([rays_o, rays_d], 0)
@@ -532,9 +543,31 @@ def train():
                                         verbose=i < 10, retraw=True,
                                         **render_kwargs_train)
         optimizer.zero_grad()
+
+        # model, preprocess = clip.load("ViT-B/32", device=device)
+        # if center_crop:
+        #     rgb = rgb.reshape([H // 2, W // 2, 3])
+        # else:
+        #     rgb = rgb.reshape([H, W, 3])
+        # rgb = Image.fromarray(rgb.byte().cpu().numpy())
+        # if i % 100 ==0 and i >0:
+        #     rgb.save("{:}image.png".format(i))
+        # rgb = preprocess(rgb).unsqueeze(0).to(device)
+        # text = clip.tokenize(["a large blue bird"]).to(device)
+        #
+        # # with torch.no_grad():
+        # image_features = model.encode_image(rgb)
+        # text_features = model.encode_text(text)
+        # image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        # text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        # loss = -100.0 * image_features @ text_features.T
+        # print(loss)
+        # logits_per_image, logits_per_text = model(rgb, text)
+
         img_loss = img2mse(rgb, target_s)
         trans = extras['raw'][..., -1]
         loss = img_loss
+        # psnr = mse2psnr(img_loss)
         psnr = mse2psnr(img_loss)
 
         if 'rgb0' in extras:
@@ -568,6 +601,11 @@ def train():
                 'optimizer_state_dict': optimizer.state_dict(),
             }, path)
             print('Saved checkpoints at', path)
+
+        # rgb = rgb.reshape([H // 2, W // 2, 3])
+        # rgb = Image.fromarray(rgb.byte().cpu().numpy())
+        # if i % 100 == 0 and i > 0:
+        #     rgb.save("{:}image.png".format(i))
 
         if i % args.i_video == 0 and i > 0:
             # Turn on testing mode
